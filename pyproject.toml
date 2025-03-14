@@ -1,0 +1,21 @@
+[tool.poetry]
+name = "legit-wallet-stealer"
+version = "0.1.0"
+description = "An educational Ethereum wallet checker that demonstrates blockchain interactions"
+authors = ["Furkan Köykıran <furkankoykiran@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+web3 = "^6.15.1"
+python-dotenv = "^1.0.1"
+requests = "^2.31.0"
+eth-account = "^0.11.0"
+colorama = "^0.4.6"
+torch = {url = "https://download.pytorch.org/whl/cu118/torch-2.2.0%2Bcu118-cp312-cp312-win_amd64.whl"}
+numpy = "^1.26.4"
+psutil = "^5.9.8"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
