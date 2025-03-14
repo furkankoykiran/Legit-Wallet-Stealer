@@ -1,9 +1,0 @@
-web3==6.11.4
-eth-account==0.10.0
-eth-utils==2.3.1
-requests==2.31.0
-torch==2.2.0
-numpy==1.26.4
-colorama==0.4.6
-python-dotenv==1.0.1
-psutil==5.9.8
