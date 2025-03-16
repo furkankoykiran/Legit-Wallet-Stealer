@@ -2,6 +2,8 @@
 
 A high-performance, GPU-accelerated cryptocurrency wallet checker that monitors multiple blockchains in parallel. This project utilizes CUDA acceleration for maximum efficiency in generating and checking wallet addresses across different networks.
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/furkankoykiran/Legit-Wallet-Stealer/blob/main/wallet_stealer.ipynb)
+
 ## Features
 
 - 🚀 GPU-accelerated wallet generation using CUDA (CuPy)
@@ -13,6 +15,13 @@ A high-performance, GPU-accelerated cryptocurrency wallet checker that monitors 
 - 📈 Automatic scaling based on available GPU resources
 - 🔄 Continuous operation with error recovery
 - 🛡️ Robust error handling and logging
+
+## Quick Start (Google Colab)
+
+1. Click the "Open in Colab" button above
+2. Enable GPU runtime: Runtime > Change runtime type > GPU
+3. Run all cells in order
+4. Enter your Telegram credentials when prompted
 
 ## Requirements
 
@@ -58,12 +67,22 @@ CHECK_INTERVAL=60
 MIN_TOKEN_VALUE_USD=10.0
 ```
 
-### Google Colab Setup
+### Google Colab Detailed Setup
 
-1. Open `wallet_stealer.ipynb` in Google Colab
-2. Enable GPU runtime (Runtime > Change runtime type > GPU)
-3. Run all cells in order
-4. Enter your Telegram credentials when prompted
+1. Click the "Open in Colab" button at the top of this README
+2. Enable GPU runtime:
+   - Click Runtime in the menu
+   - Select "Change runtime type"
+   - Choose "GPU" from the hardware accelerator dropdown
+   - Click "Save"
+3. Run all cells in order:
+   - Each cell will show a checkmark when completed
+   - The system will verify GPU availability
+   - You'll be prompted for Telegram credentials
+4. Monitor the execution:
+   - Check GPU utilization in the provided stats
+   - Watch for Telegram notifications
+   - View logs in the output
 
 ## Architecture
 
@@ -107,9 +126,7 @@ python main.py
 
 ### Running on Google Colab
 
-1. Open `wallet_stealer.ipynb` in Google Colab
-2. Follow the setup instructions in the notebook
-3. Run all cells
+Simply click the "Open in Colab" button at the top of this README and follow the Quick Start instructions.
 
 ## Monitoring
 
