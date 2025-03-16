@@ -1,0 +1,32 @@
+[tool.poetry]
+name = "legit-wallet-stealer"
+version = "0.1.0"
+description = "GPU-accelerated Ethereum wallet balance checker"
+authors = ["Furkan Köykıran <furkankoykiran@gmail.com>"]
+readme = "README.md"
+packages = [{include = "src"}]
+
+[tool.poetry.dependencies]
+python = "^3.12"
+web3 = "^6.15.1"
+eth-account = "^0.11.0"
+requests = "^2.31.0"
+numpy = "^1.26.4"
+typing-extensions = "^4.10.0"
+wheel = "^0.43.0"
+setuptools = "^69.2.0"
+torchvision = {version = "^0.17.0", source = "pytorch"}
+torchaudio = {version = "^2.2.0", source = "pytorch"}
+torch = {version = "^2.2.0", source = "pytorch"}
+
+[[tool.poetry.source]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu121"
+priority = "explicit"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.scripts]
+wallet-checker = "main:main"
