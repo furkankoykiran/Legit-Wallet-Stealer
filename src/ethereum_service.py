@@ -37,6 +37,9 @@ class EthereumService:
         
     def _warm_up_gpu(self):
         """Warm up GPU with some initial computations."""
+        if self.device.type != "cuda":
+            return
+            
         try:
             # Run a few initial computations to warm up the GPU
             for _ in range(5):
@@ -67,89 +70,154 @@ class EthereumService:
             
             if not web3.is_connected():
                 raise ConnectionError("Failed to connect to Ethereum node")
-                
-            if web3.eth.chain_id != 1:  # 1 is the chain ID for Ethereum mainnet
-                raise ValueError("Not connected to Ethereum mainnet")
-                
+            
             return web3
             
         except Exception as e:
             raise ConnectionError(f"Failed to initialize Web3: {str(e)}")
 
     def generate_random_mnemonic(self, word_list: List[str]) -> str:
-        """Generate a random mnemonic phrase."""
-        selected_words = random.sample(word_list, MNEMONIC_WORD_COUNT)
-        return " ".join(selected_words)
+        """Generate a BIP39 compliant mnemonic phrase."""
+        try:
+            # Generate random entropy
+            entropy = random.randbytes(16)  # 128 bits for 12-word mnemonic
+            account = Account.from_key(entropy)
+            # Create account and get its private key
+            private_key = account.key
+            # Use the private key to generate a deterministic mnemonic
+            account_with_mnemonic = Account.from_key(private_key)
+            return account_with_mnemonic._custom_key_to_mnemonic(private_key)
+        except Exception as e:
+            print(f"Single mnemonic generation error: {e}")
+            return None
 
     def generate_random_mnemonics_gpu(self, word_list: List[str], batch_size: int) -> List[str]:
-        """Generate multiple random mnemonic phrases using GPU acceleration."""
+        """Generate multiple BIP39 compliant mnemonic phrases using GPU for entropy."""
         try:
             if self.device.type == "cuda":
-                # Convert word list to tensor for GPU operations
-                word_count = len(word_list)
+                # Generate random numbers on GPU
+                entropy_size = 16  # 128 bits for 12-word mnemonic
+                entropy_tensor = torch.randint(
+                    0, 256,
+                    (batch_size, entropy_size),
+                    dtype=torch.uint8,
+                    device=self.device
+                )
                 
-                # Generate random indices on GPU
-                with torch.cuda.device(self.device):
-                    # Create a tensor of indices for each position in each mnemonic
-                    indices = torch.empty(
-                        (batch_size, MNEMONIC_WORD_COUNT),
-                        dtype=torch.long,
-                        device=self.device
-                    )
-                    
-                    # Fill with random indices efficiently
-                    for i in range(MNEMONIC_WORD_COUNT):
-                        indices[:, i] = torch.randint(
-                            0, word_count, (batch_size,),
-                            device=self.device
-                        )
-                    
-                    # Move to CPU and convert to numpy for word lookup
-                    indices = indices.cpu().numpy()
-                    
-                torch.cuda.synchronize()  # Ensure GPU operations are complete
+                # Move to CPU and convert to bytes
+                entropy_list = [bytes(e.tolist()) for e in entropy_tensor.cpu()]
                 
-                # Convert indices to words using numpy for efficiency
-                return [
-                    " ".join(np.array(word_list)[indices[i]])
-                    for i in range(batch_size)
-                ]
+                # Generate mnemonics in parallel
+                with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
+                    futures = []
+                    for entropy in entropy_list:
+                        futures.append(executor.submit(self._entropy_to_mnemonic, entropy))
+                    
+                    mnemonics = []
+                    for future in concurrent.futures.as_completed(futures):
+                        mnemonic = future.result()
+                        if mnemonic:
+                            mnemonics.append(mnemonic)
+                
+                # If we didn't get enough valid mnemonics, generate more
+                while len(mnemonics) < batch_size:
+                    mnemonic = self.generate_random_mnemonic(word_list)
+                    if mnemonic:
+                        mnemonics.append(mnemonic)
+                
+                return mnemonics[:batch_size]
+            
+            # Fallback to CPU generation
+            return [m for m in [self.generate_random_mnemonic(word_list) for _ in range(batch_size)] if m]
+            
         except Exception as e:
-            print(f"GPU mnemonic generation error, falling back to CPU: {e}")
-        
-        # Fallback to CPU generation
-        return [self.generate_random_mnemonic(word_list) for _ in range(batch_size)]
+            print(f"Batch mnemonic generation error: {e}")
+            return []
+    
+    def _entropy_to_mnemonic(self, entropy: bytes) -> Optional[str]:
+        """Convert entropy bytes to a mnemonic phrase."""
+        try:
+            account = Account.from_key(entropy)
+            private_key = account.key
+            account_with_mnemonic = Account.from_key(private_key)
+            return account_with_mnemonic._custom_key_to_mnemonic(private_key)
+        except Exception as e:
+            print(f"Entropy to mnemonic error: {e}")
+            return None
 
     def check_wallet(self, mnemonic: str) -> Tuple[Optional[str], float]:
         """Check the balance of a wallet generated from a mnemonic phrase."""
         try:
-            # Generate account (this is CPU intensive)
             account = Account.from_mnemonic(mnemonic)
-            address = account.address
-            
-            try:
-                # Get balance (this is I/O intensive)
-                balance_wei = self.get_balance(address)
-                if balance_wei > 0:
-                    return address, float(self.from_wei(balance_wei, 'ether'))
-                return address, 0.0
-                
-            except (exceptions.ValidationError, 
-                   exceptions.BlockNotFound, 
-                   exceptions.TransactionNotFound):
-                return None, 0.0
-                
-        except (exceptions.ValidationError, ValueError):
-            return None, 0.0
+            return account.address, 0.0  # Initially return 0 balance
         except Exception as e:
-            print(f"Unexpected error checking wallet: {e}")
+            print(f"Error creating wallet from mnemonic: {e}")
             return None, 0.0
 
     def check_wallets_batch(self, mnemonics: List[str]) -> List[Tuple[Optional[str], float]]:
-        """Check multiple wallets in parallel for better performance."""
-        # Use more threads when GPU is handling the computation
-        max_workers = 32 if self.device.type == "cuda" else 10
-        max_workers = min(max_workers, len(mnemonics))
+        """Check multiple wallets in parallel with batch balance checking."""
+        try:
+            # Generate all accounts first
+            results = []
+            valid_addresses = []
+            address_to_mnemonic = {}
             
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            return list(executor.map(self.check_wallet, mnemonics))
+            # Create accounts in parallel
+            with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
+                wallet_results = list(executor.map(self.check_wallet, mnemonics))
+            
+            # Collect valid addresses
+            for mnemonic, (address, _) in zip(mnemonics, wallet_results):
+                if address:
+                    valid_addresses.append(address)
+                    address_to_mnemonic[address] = mnemonic
+                    results.append((address, 0.0))
+                else:
+                    results.append((None, 0.0))
+            
+            if not valid_addresses:
+                return results
+            
+            # Batch request balances
+            try:
+                # Get balances in one call using batch request
+                batch = [
+                    {
+                        'jsonrpc': '2.0',
+                        'method': 'eth_getBalance',
+                        'params': [addr, 'latest'],
+                        'id': idx
+                    }
+                    for idx, addr in enumerate(valid_addresses)
+                ]
+                
+                response = self.web3.provider.make_request("eth_getBatch", [batch])
+                
+                # Process batch response
+                if isinstance(response, list):
+                    for bal_resp, address in zip(response, valid_addresses):
+                        if 'result' in bal_resp:
+                            balance_wei = int(bal_resp['result'], 16)
+                            if balance_wei > 0:
+                                balance_eth = float(self.from_wei(balance_wei, 'ether'))
+                                # Update corresponding result
+                                idx = valid_addresses.index(address)
+                                results[idx] = (address, balance_eth)
+                
+            except Exception as e:
+                print(f"Batch balance check failed, falling back to individual checks: {e}")
+                # Fallback to individual balance checks
+                for i, address in enumerate(valid_addresses):
+                    try:
+                        balance_wei = self.get_balance(address)
+                        if balance_wei > 0:
+                            balance_eth = float(self.from_wei(balance_wei, 'ether'))
+                            results[i] = (address, balance_eth)
+                    except:
+                        continue
+            
+            return results
+            
+        except Exception as e:
+            print(f"Batch checking error: {e}")
+            return [(None, 0.0) for _ in mnemonics]
