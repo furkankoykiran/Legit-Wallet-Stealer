@@ -1,7 +1,11 @@
 """Entry point for the Ethereum wallet checker application."""
+import multiprocessing
 from src.wallet_checker import WalletChecker
 import colorama
 from colorama import Fore, Style
+
+# Set multiprocessing start method to 'spawn' for CUDA compatibility
+multiprocessing.set_start_method('spawn', force=True)
 
 def main():
     """Main entry point of the application."""
