@@ -76,7 +76,6 @@ cover/
 
 # Jupyter Notebook
 .ipynb_checkpoints
-*.ipynb
 jupyter_execute/
 
 # Environment variables and secrets
