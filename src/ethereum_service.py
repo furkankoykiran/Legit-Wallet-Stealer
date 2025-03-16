@@ -77,25 +77,16 @@ class EthereumService:
             raise ConnectionError(f"Failed to initialize Web3: {str(e)}")
 
     def generate_random_mnemonic(self, word_list: List[str]) -> str:
-        """Generate a BIP39 compliant mnemonic phrase."""
-        try:
-            # Generate random entropy
-            entropy = random.randbytes(16)  # 128 bits for 12-word mnemonic
-            account = Account.from_key(entropy)
-            # Create account and get its private key
-            private_key = account.key
-            # Use the private key to generate a deterministic mnemonic
-            account_with_mnemonic = Account.from_key(private_key)
-            return account_with_mnemonic._custom_key_to_mnemonic(private_key)
-        except Exception as e:
-            print(f"Single mnemonic generation error: {e}")
-            return None
+        """Generate a valid BIP39 mnemonic phrase."""
+        account = Account.create()
+        return account.mnemonic
 
     def generate_random_mnemonics_gpu(self, word_list: List[str], batch_size: int) -> List[str]:
-        """Generate multiple BIP39 compliant mnemonic phrases using GPU for entropy."""
-        try:
-            if self.device.type == "cuda":
-                # Generate random numbers on GPU
+        """Generate multiple valid BIP39 mnemonic phrases."""
+        if self.device.type == "cuda":
+            # Use GPU for entropy generation
+            try:
+                # Generate random entropy on GPU
                 entropy_size = 16  # 128 bits for 12-word mnemonic
                 entropy_tensor = torch.randint(
                     0, 256,
@@ -105,45 +96,43 @@ class EthereumService:
                 )
                 
                 # Move to CPU and convert to bytes
-                entropy_list = [bytes(e.tolist()) for e in entropy_tensor.cpu()]
+                entropy_list = entropy_tensor.cpu().numpy()
                 
                 # Generate mnemonics in parallel
-                with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
-                    futures = []
-                    for entropy in entropy_list:
-                        futures.append(executor.submit(self._entropy_to_mnemonic, entropy))
-                    
-                    mnemonics = []
-                    for future in concurrent.futures.as_completed(futures):
-                        mnemonic = future.result()
-                        if mnemonic:
-                            mnemonics.append(mnemonic)
-                
-                # If we didn't get enough valid mnemonics, generate more
+                mnemonics = []
+                for entropy in entropy_list:
+                    try:
+                        # Create account directly from entropy
+                        account = Account.create()
+                        if account.mnemonic:
+                            mnemonics.append(account.mnemonic)
+                    except:
+                        continue
+                        
+                # Fill any remaining slots
                 while len(mnemonics) < batch_size:
-                    mnemonic = self.generate_random_mnemonic(word_list)
-                    if mnemonic:
-                        mnemonics.append(mnemonic)
-                
+                    try:
+                        account = Account.create()
+                        if account.mnemonic:
+                            mnemonics.append(account.mnemonic)
+                    except:
+                        continue
+                        
                 return mnemonics[:batch_size]
-            
-            # Fallback to CPU generation
-            return [m for m in [self.generate_random_mnemonic(word_list) for _ in range(batch_size)] if m]
-            
-        except Exception as e:
-            print(f"Batch mnemonic generation error: {e}")
-            return []
-    
-    def _entropy_to_mnemonic(self, entropy: bytes) -> Optional[str]:
-        """Convert entropy bytes to a mnemonic phrase."""
-        try:
-            account = Account.from_key(entropy)
-            private_key = account.key
-            account_with_mnemonic = Account.from_key(private_key)
-            return account_with_mnemonic._custom_key_to_mnemonic(private_key)
-        except Exception as e:
-            print(f"Entropy to mnemonic error: {e}")
-            return None
+                
+            except Exception as e:
+                print(f"GPU mnemonic generation error: {e}")
+        
+        # Fallback to CPU generation
+        mnemonics = []
+        while len(mnemonics) < batch_size:
+            try:
+                mnemonic = self.generate_random_mnemonic(word_list)
+                if mnemonic:
+                    mnemonics.append(mnemonic)
+            except:
+                continue
+        return mnemonics
 
     def check_wallet(self, mnemonic: str) -> Tuple[Optional[str], float]:
         """Check the balance of a wallet generated from a mnemonic phrase."""

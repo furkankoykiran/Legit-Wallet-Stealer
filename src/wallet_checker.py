@@ -6,7 +6,7 @@ import time
 from typing import List
 import torch
 from colorama import Fore, Style, init
-from src.config import load_word_list
+from src.config import load_system_config
 from src.ethereum_service import EthereumService
 from src.telegram_service import TelegramService
 from src.system_service import SystemService
@@ -44,59 +44,69 @@ def format_number(num: float) -> str:
         color = Fore.RED
     return f"{color}{num:,.2f}{Style.RESET_ALL}"
 
-def worker_process(worker_id: int, word_list: List[str], counter: SharedCounter, device: str):
+def worker_process(worker_id: int, counter: SharedCounter, device: str):
     """Worker process for checking wallets."""
     try:
-        ethereum = EthereumService()
-        telegram = TelegramService()
-        
-        # Optimize batch size based on available GPU memory
-        if device == "cuda":
-            total_memory = torch.cuda.get_device_properties(0).total_memory
-            # Use larger batches for GPUs with more memory
-            BATCH_SIZE = min(1000, max(200, int(total_memory / (1024 * 1024 * 1024) * 100)))
-        else:
-            BATCH_SIZE = 50
-            
+        # Initialize variables
         start_time = time.time()
         local_checked = 0
         
-        # Pre-generate some mnemonics to avoid initial delay
-        initial_mnemonics = []
-        print(f"{Fore.YELLOW}Worker {worker_id} preparing initial batch...{Style.RESET_ALL}")
+        # Initialize services
+        ethereum = EthereumService()
+        telegram = TelegramService()
         
-        # Generate initial batch of mnemonics
+        # Calculate optimal batch size based on memory
         if device == "cuda":
-            initial_mnemonics = ethereum.generate_random_mnemonics_gpu(word_list, BATCH_SIZE * 2)
+            total_memory = torch.cuda.get_device_properties(0).total_memory
+            BATCH_SIZE = min(2000, max(500, int(total_memory / (1024 * 1024 * 1024) * 200)))
+            
+            # Configure CUDA for this process
+            torch.cuda.empty_cache()
+            torch.backends.cudnn.benchmark = True
+            torch.cuda.set_per_process_memory_fraction(0.8)
+            
+            # Generate first batch immediately
+            mnemonics = ethereum.generate_random_mnemonics_gpu([], BATCH_SIZE)
+            if mnemonics:
+                print(f"{Fore.GREEN}Worker {worker_id} initialized with {len(mnemonics)} mnemonics{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.YELLOW}Worker {worker_id} initialization retry...{Style.RESET_ALL}")
         else:
-            initial_mnemonics = [ethereum.generate_random_mnemonic(word_list) for _ in range(BATCH_SIZE)]
+            BATCH_SIZE = 50
         
-        print(f"{Fore.GREEN}Worker {worker_id} ready with {len(initial_mnemonics)} initial mnemonics{Style.RESET_ALL}")
+        mnemonic_buffer = []
         
         while True:
             try:
-                # Use pre-generated mnemonics or generate new ones
-                if initial_mnemonics:
-                    mnemonics = initial_mnemonics[:BATCH_SIZE]
-                    initial_mnemonics = initial_mnemonics[BATCH_SIZE:]
-                else:
+                # Refill buffer if needed
+                if len(mnemonic_buffer) < BATCH_SIZE:
                     if device == "cuda":
-                        mnemonics = ethereum.generate_random_mnemonics_gpu(word_list, BATCH_SIZE)
+                        # Generate larger batch for GPU efficiency
+                        new_mnemonics = ethereum.generate_random_mnemonics_gpu([], BATCH_SIZE * 2)
+                        if new_mnemonics:
+                            mnemonic_buffer.extend(new_mnemonics)
                     else:
-                        mnemonics = [ethereum.generate_random_mnemonic(word_list) for _ in range(BATCH_SIZE)]
+                        # CPU generation
+                        while len(mnemonic_buffer) < BATCH_SIZE:
+                            mnemonic = ethereum.generate_random_mnemonic([])
+                            if mnemonic:
+                                mnemonic_buffer.append(mnemonic)
                 
-                if not mnemonics:
-                    print(f"{Fore.RED}Worker {worker_id} failed to generate mnemonics, retrying...{Style.RESET_ALL}")
+                # Get current batch
+                current_batch = mnemonic_buffer[:BATCH_SIZE]
+                mnemonic_buffer = mnemonic_buffer[BATCH_SIZE:]
+                
+                if not current_batch:
                     continue
                 
-                # Check wallets in parallel
-                results = ethereum.check_wallets_batch(mnemonics)
+                # Process batch
+                results = ethereum.check_wallets_batch(current_batch)
+                batch_success = 0
                 
-                # Process results
-                valid_checks = 0
-                for mnemonic, (address, balance) in zip(mnemonics, results):
+                # Process results efficiently
+                for mnemonic, (address, balance) in zip(current_batch, results):
                     if address:
-                        valid_checks += 1
+                        batch_success += 1
                         if balance > 0:
                             message = (
                                 f"[+] Found wallet with balance!\n"
@@ -107,34 +117,35 @@ def worker_process(worker_id: int, word_list: List[str], counter: SharedCounter,
                             telegram.send_message(message)
                             return
                 
-                # Update counters with actual valid checks
-                if valid_checks > 0:
-                    local_checked += valid_checks
-                    total_checked = counter.increment(valid_checks)
+                # Update statistics
+                if batch_success > 0:
+                    local_checked += batch_success
+                    total_checked = counter.increment(batch_success)
                     
-                    # Calculate and display performance metrics
+                    elapsed_time = time.time() - start_time
+                    wallets_per_second = local_checked / elapsed_time
+                    
+                    # Show progress every 1000 wallets
                     if local_checked % 1000 == 0:
-                        elapsed_time = time.time() - start_time
-                        wallets_per_second = local_checked / elapsed_time
                         status = (
                             f"{Fore.CYAN}Worker {worker_id:<2}{Style.RESET_ALL} | "
                             f"Speed: {format_number(wallets_per_second)} w/s | "
-                            f"Valid: {valid_checks}/{BATCH_SIZE} | "
+                            f"Success: {batch_success}/{BATCH_SIZE} | "
                             f"Total: {Fore.BLUE}{total_checked:,}{Style.RESET_ALL}"
                         )
                         print(status)
                 
-                # Generate next batch in background while checking current batch
-                if device == "cuda" and len(initial_mnemonics) < BATCH_SIZE:
-                    initial_mnemonics.extend(
-                        ethereum.generate_random_mnemonics_gpu(word_list, BATCH_SIZE)
-                    )
+                # Start generating next batch while processing current one
+                if device == "cuda" and len(mnemonic_buffer) < BATCH_SIZE:
+                    next_batch = ethereum.generate_random_mnemonics_gpu([], BATCH_SIZE)
+                    if next_batch:
+                        mnemonic_buffer.extend(next_batch)
                     
             except KeyboardInterrupt:
                 break
             except Exception as e:
                 print(f"{Fore.RED}Worker {worker_id} error: {e}{Style.RESET_ALL}")
-                time.sleep(1)  # Prevent rapid error loops
+                time.sleep(0.1)  # Brief pause on error
                 continue
                 
     except Exception as e:
@@ -147,17 +158,21 @@ class WalletChecker:
     """Main class for checking Ethereum wallets."""
 
     def __init__(self):
-        """Initialize services and load word list."""
-        self.word_list = load_word_list()
+        """Initialize services and system configuration."""
+        self.config = load_system_config()
         self.telegram = TelegramService()
         self.counter = SharedCounter()
         self.system = SystemService()
         
         # Setup system
         self.device = self.system.check_gpu_availability()
-        self.worker_count = self.system.get_optimal_worker_count()
+        self.worker_count = min(16, self.system.get_optimal_worker_count())  # Limit workers
         
         if self.device.type == "cuda":
+            # Configure CUDA settings
+            torch.backends.cudnn.benchmark = True
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
             # Pre-allocate GPU memory
             self._prepare_gpu()
             
@@ -210,14 +225,17 @@ class WalletChecker:
         start_time = time.time()
         
         try:
-            # Create and start worker processes
+            # Create and start worker processes with delay
             for i in range(self.worker_count):
                 p = multiprocessing.Process(
                     target=worker_process,
-                    args=(i, self.word_list, self.counter, self.device.type)
+                    args=(i, self.counter, self.device.type)
                 )
                 processes.append(p)
                 p.start()
+                # Small delay between worker starts to prevent GPU memory contention
+                if self.device.type == "cuda":
+                    time.sleep(0.5)
 
             # Monitor and display overall progress
             try:
