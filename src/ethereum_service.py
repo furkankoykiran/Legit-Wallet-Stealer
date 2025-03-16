@@ -55,28 +55,46 @@ class EthereumService:
 
     def _initialize_web3(self) -> Web3:
         """Initialize and configure Web3 connection with optimizations."""
-        try:
-            provider = Web3.HTTPProvider(
-                GETH_ENDPOINT,
-                request_kwargs={
-                    'timeout': 30,
-                    'headers': {
-                        "Content-Type": "application/json",
+        max_retries = 3
+        retry_delay = 5
+        last_error = None
+        
+        for attempt in range(max_retries):
+            try:
+                provider = Web3.HTTPProvider(
+                    GETH_ENDPOINT,
+                    request_kwargs={
+                        'timeout': 60,  # Increased timeout
+                        'headers': {
+                            "Content-Type": "application/json",
+                        }
                     }
-                }
-            )
-            web3 = Web3(provider)
-            
-            # Add PoA middleware for compatibility
-            web3.middleware_onion.inject(geth_poa_middleware, layer=0)
-            
-            if not web3.is_connected():
-                raise ConnectionError("Failed to connect to Ethereum node")
-            
-            return web3
-            
-        except Exception as e:
-            raise ConnectionError(f"Failed to initialize Web3: {str(e)}")
+                )
+                web3 = Web3(provider)
+                
+                # Add PoA middleware for compatibility
+                web3.middleware_onion.inject(geth_poa_middleware, layer=0)
+                
+                # Test connection
+                if not web3.is_connected():
+                    raise ConnectionError("Node is not responding")
+                    
+                # Verify sync status
+                sync_status = web3.eth.syncing
+                if sync_status is not False:
+                    print(f"Warning: Node is still syncing - {sync_status}")
+                
+                print(f"Connected to Ethereum node at block {web3.eth.block_number:,}")
+                return web3
+                
+            except Exception as e:
+                last_error = str(e)
+                if attempt < max_retries - 1:
+                    print(f"Connection attempt {attempt + 1} failed, retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                
+        raise ConnectionError(f"Failed to initialize Web3 after {max_retries} attempts: {last_error}")
 
     def _generate_private_key(self) -> bytes:
         """Generate a random private key."""

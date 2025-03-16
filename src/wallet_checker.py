@@ -5,9 +5,11 @@ from multiprocessing import Value, Lock
 import time
 from typing import List
 import torch
+from web3 import Web3
 from colorama import Fore, Style, init
 from src.config import load_system_config
 from src.ethereum_service import EthereumService
+import random
 from src.telegram_service import TelegramService
 from src.system_service import SystemService
 import os
@@ -46,14 +48,34 @@ def format_number(num: float) -> str:
 
 def worker_process(worker_id: int, counter: SharedCounter, device: str):
     """Worker process for checking wallets."""
+    # Initialize variables
+    start_time = time.time()
+    local_checked = 0
+    ethereum = None
+    max_retries = 5
+
+    # Initialize services with retry
+    for attempt in range(max_retries):
+        try:
+            print(f"{Fore.YELLOW}Worker {worker_id} connecting to Ethereum node (attempt {attempt + 1}/{max_retries})...{Style.RESET_ALL}")
+            ethereum = EthereumService()
+            telegram = TelegramService()
+            # Test connection
+            w3 = Web3(Web3.HTTPProvider('http://127.0.0.1:8545'))
+            if not w3.is_connected():
+                raise ConnectionError("Node not responding")
+            print(f"{Fore.GREEN}Worker {worker_id} connected successfully{Style.RESET_ALL}")
+            break
+        except Exception as e:
+            if attempt < max_retries - 1:
+                retry_delay = random.uniform(1, 3) * (attempt + 1)  # Randomized exponential backoff
+                print(f"{Fore.RED}Worker {worker_id} initialization failed: {e}, retrying in {retry_delay:.1f}s...{Style.RESET_ALL}")
+                time.sleep(retry_delay)
+            else:
+                print(f"{Fore.RED}Worker {worker_id} failed to initialize after {max_retries} attempts{Style.RESET_ALL}")
+                return
+
     try:
-        # Initialize variables
-        start_time = time.time()
-        local_checked = 0
-        
-        # Initialize services
-        ethereum = EthereumService()
-        telegram = TelegramService()
         
         # Calculate optimal batch size based on memory
         if device == "cuda":
@@ -205,12 +227,29 @@ class WalletChecker:
 
     def start(self):
         """Start the wallet checking processes."""
-        # Ensure Geth is running if using local node
-        if "127.0.0.1" in os.getenv("GETH_ENDPOINT", ""):
-            if not self.system.ensure_geth_running():
-                print(f"{Fore.RED}Failed to ensure Geth is running. "
-                      f"Please start Geth manually.{Style.RESET_ALL}")
+        # Ensure Geth is running and synced
+        try:
+            print(f"{Fore.YELLOW}Waiting for Geth to be ready...{Style.RESET_ALL}")
+            w3 = Web3(Web3.HTTPProvider('http://127.0.0.1:8545'))
+            
+            # Wait for Geth to be ready
+            start_wait = time.time()
+            while time.time() - start_wait < 300:  # 5 minutes timeout
+                try:
+                    if w3.is_connected() and w3.eth.syncing is False:
+                        print(f"{Fore.GREEN}Geth is ready! Current block: {w3.eth.block_number:,}{Style.RESET_ALL}")
+                        break
+                except:
+                    pass
+                print("Waiting for Geth sync... (press Ctrl+C to cancel)")
+                time.sleep(5)
+            else:
+                print(f"{Fore.RED}Geth connection timeout after 5 minutes.{Style.RESET_ALL}")
                 return
+                
+        except Exception as e:
+            print(f"{Fore.RED}Failed to connect to Geth: {e}{Style.RESET_ALL}")
+            return
 
         # Send initial notification
         hostname = socket.gethostname()
