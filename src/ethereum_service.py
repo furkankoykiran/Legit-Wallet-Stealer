@@ -11,6 +11,7 @@ from eth_utils import exceptions
 from eth_keys import keys
 import concurrent.futures
 from src.config import GETH_ENDPOINT, MNEMONIC_WORD_COUNT
+import time
 
 class EthereumService:
     """Service class for Ethereum operations."""
