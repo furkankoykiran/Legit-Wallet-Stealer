@@ -82,21 +82,23 @@ def worker_process(worker_id: int, counter: SharedCounter, device: str):
                 if len(mnemonic_buffer) < BATCH_SIZE:
                     if device == "cuda":
                         # Generate larger batch for GPU efficiency
-                        new_mnemonics = ethereum.generate_random_mnemonics_gpu([], BATCH_SIZE * 2)
-                        if new_mnemonics:
-                            mnemonic_buffer.extend(new_mnemonics)
+                        new_addresses = ethereum.generate_random_mnemonics_gpu([], BATCH_SIZE * 2)
+                        if new_addresses:
+                            mnemonic_buffer.extend(new_addresses)
                     else:
                         # CPU generation
                         while len(mnemonic_buffer) < BATCH_SIZE:
-                            mnemonic = ethereum.generate_random_mnemonic([])
-                            if mnemonic:
-                                mnemonic_buffer.append(mnemonic)
+                            address = ethereum.generate_random_mnemonic([])
+                            if address:
+                                mnemonic_buffer.append(address)
                 
                 # Get current batch
                 current_batch = mnemonic_buffer[:BATCH_SIZE]
                 mnemonic_buffer = mnemonic_buffer[BATCH_SIZE:]
                 
                 if not current_batch:
+                    if device == "cuda":
+                        print(f"{Fore.YELLOW}Worker {worker_id} regenerating addresses...{Style.RESET_ALL}")
                     continue
                 
                 # Process batch
@@ -104,36 +106,34 @@ def worker_process(worker_id: int, counter: SharedCounter, device: str):
                 batch_success = 0
                 
                 # Process results efficiently
-                for mnemonic, (address, balance) in zip(current_batch, results):
-                    if address:
+                for address, (valid_address, balance) in zip(current_batch, results):
+                    if valid_address:
                         batch_success += 1
                         if balance > 0:
                             message = (
                                 f"[+] Found wallet with balance!\n"
-                                f"Mnemonic: {mnemonic}\n"
-                                f"Balance: {balance} ETH\n"
-                                f"Address: {address}"
+                                f"Address: {address}\n"
+                                f"Balance: {balance} ETH"
                             )
                             telegram.send_message(message)
                             return
                 
-                # Update statistics
-                if batch_success > 0:
-                    local_checked += batch_success
-                    total_checked = counter.increment(batch_success)
+                # Update statistics for all processed wallets
+                local_checked += len(current_batch)
+                total_checked = counter.increment(len(current_batch))
                     
-                    elapsed_time = time.time() - start_time
-                    wallets_per_second = local_checked / elapsed_time
-                    
-                    # Show progress every 1000 wallets
-                    if local_checked % 1000 == 0:
-                        status = (
-                            f"{Fore.CYAN}Worker {worker_id:<2}{Style.RESET_ALL} | "
-                            f"Speed: {format_number(wallets_per_second)} w/s | "
-                            f"Success: {batch_success}/{BATCH_SIZE} | "
-                            f"Total: {Fore.BLUE}{total_checked:,}{Style.RESET_ALL}"
-                        )
-                        print(status)
+                elapsed_time = time.time() - start_time
+                wallets_per_second = local_checked / elapsed_time
+                
+                # Show progress every 100 wallets
+                if local_checked % 100 == 0:
+                    status = (
+                        f"{Fore.CYAN}Worker {worker_id:<2}{Style.RESET_ALL} | "
+                        f"Speed: {format_number(wallets_per_second)} w/s | "
+                        f"Valid: {batch_success}/{len(current_batch)} | "
+                        f"Total: {Fore.BLUE}{total_checked:,}{Style.RESET_ALL}"
+                    )
+                    print(status)
                 
                 # Start generating next batch while processing current one
                 if device == "cuda" and len(mnemonic_buffer) < BATCH_SIZE:

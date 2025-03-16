@@ -3,10 +3,12 @@ import random
 import torch
 import numpy as np
 from typing import Tuple, List, Optional
+import os
 from web3 import Web3
 from web3.middleware import geth_poa_middleware
 from eth_account import Account
 from eth_utils import exceptions
+from eth_keys import keys
 import concurrent.futures
 from src.config import GETH_ENDPOINT, MNEMONIC_WORD_COUNT
 
@@ -76,72 +78,131 @@ class EthereumService:
         except Exception as e:
             raise ConnectionError(f"Failed to initialize Web3: {str(e)}")
 
+    def _generate_private_key(self) -> bytes:
+        """Generate a random private key."""
+        return os.urandom(32)  # 256 bits
+
     def generate_random_mnemonic(self, word_list: List[str]) -> str:
-        """Generate a valid BIP39 mnemonic phrase."""
-        account = Account.create()
-        return account.mnemonic
+        """Generate a valid private key and convert to address."""
+        try:
+            private_key = self._generate_private_key()
+            account = Account.from_key(private_key)
+            return account.address
+        except Exception as e:
+            print(f"Private key generation error: {e}")
+            return None
 
     def generate_random_mnemonics_gpu(self, word_list: List[str], batch_size: int) -> List[str]:
-        """Generate multiple valid BIP39 mnemonic phrases."""
-        if self.device.type == "cuda":
-            # Use GPU for entropy generation
-            try:
-                # Generate random entropy on GPU
-                entropy_size = 16  # 128 bits for 12-word mnemonic
-                entropy_tensor = torch.randint(
+        """Generate multiple private keys and convert to addresses using GPU for randomness."""
+        try:
+            addresses = []
+            if self.device.type == "cuda":
+                # Generate batch of random numbers on GPU
+                random_tensor = torch.randint(
                     0, 256,
-                    (batch_size, entropy_size),
+                    (batch_size, 32),  # 32 bytes for each private key
                     dtype=torch.uint8,
                     device=self.device
                 )
                 
-                # Move to CPU and convert to bytes
-                entropy_list = entropy_tensor.cpu().numpy()
-                
-                # Generate mnemonics in parallel
-                mnemonics = []
-                for entropy in entropy_list:
-                    try:
-                        # Create account directly from entropy
-                        account = Account.create()
-                        if account.mnemonic:
-                            mnemonics.append(account.mnemonic)
-                    except:
-                        continue
+                # Process in smaller chunks for efficiency
+                chunk_size = 100
+                for i in range(0, batch_size, chunk_size):
+                    chunk = random_tensor[i:i+chunk_size].cpu().numpy()
+                    for private_key_bytes in chunk:
+                        try:
+                            account = Account.from_key(bytes(private_key_bytes))
+                            if account and account.address:
+                                addresses.append(account.address)
+                        except:
+                            continue
+                            
+                    if len(addresses) >= batch_size:
+                        break
                         
-                # Fill any remaining slots
-                while len(mnemonics) < batch_size:
-                    try:
-                        account = Account.create()
-                        if account.mnemonic:
-                            mnemonics.append(account.mnemonic)
-                    except:
-                        continue
-                        
-                return mnemonics[:batch_size]
-                
-            except Exception as e:
-                print(f"GPU mnemonic generation error: {e}")
-        
-        # Fallback to CPU generation
-        mnemonics = []
-        while len(mnemonics) < batch_size:
-            try:
-                mnemonic = self.generate_random_mnemonic(word_list)
-                if mnemonic:
-                    mnemonics.append(mnemonic)
-            except:
-                continue
-        return mnemonics
-
-    def check_wallet(self, mnemonic: str) -> Tuple[Optional[str], float]:
-        """Check the balance of a wallet generated from a mnemonic phrase."""
-        try:
-            account = Account.from_mnemonic(mnemonic)
-            return account.address, 0.0  # Initially return 0 balance
+                # Return exact batch size
+                return addresses[:batch_size]
+            
+            # Fallback to CPU generation
+            while len(addresses) < batch_size:
+                address = self.generate_random_mnemonic([])
+                if address:
+                    addresses.append(address)
+                    
+            return addresses
+            
         except Exception as e:
-            print(f"Error creating wallet from mnemonic: {e}")
+            print(f"Batch key generation error: {e}")
+            return []
+
+    def check_wallet(self, address: str) -> Tuple[Optional[str], float]:
+        """Check the balance of a wallet address."""
+        try:
+            if not address or not Web3.is_address(address):
+                return None, 0.0
+                
+            # Get balance efficiently
+            try:
+                balance_wei = self.get_balance(address)
+                if balance_wei > 0:
+                    return address, float(self.from_wei(balance_wei, 'ether'))
+                return address, 0.0
+            except Exception as e:
+                print(f"Balance check error for {address[:10]}...: {e}")
+                return address, 0.0
+                
+        except Exception as e:
+            print(f"Wallet check error: {e}")
             return None, 0.0
+
+    def check_wallets_batch(self, addresses: List[str]) -> List[Tuple[Optional[str], float]]:
+        """Check multiple wallet addresses in parallel."""
+        try:
+            # Filter valid addresses first
+            valid_addresses = [addr for addr in addresses if addr and Web3.is_address(addr)]
+            
+            if not valid_addresses:
+                return [(None, 0.0)] * len(addresses)
+            
+            # Create batch request for balances
+            batch = [
+                {
+                    'jsonrpc': '2.0',
+                    'method': 'eth_getBalance',
+                    'params': [addr, 'latest'],
+                    'id': i
+                }
+                for i, addr in enumerate(valid_addresses)
+            ]
+            
+            try:
+                # Send batch request
+                response = self.web3.provider.make_request("eth_getBatch", [batch])
+                
+                if isinstance(response, list):
+                    # Process responses
+                    results = [(None, 0.0)] * len(addresses)  # Initialize with default values
+                    
+                    for i, (addr, resp) in enumerate(zip(valid_addresses, response)):
+                        if 'result' in resp:
+                            balance_wei = int(resp['result'], 16)
+                            balance_eth = float(self.from_wei(balance_wei, 'ether'))
+                            # Find original index
+                            orig_idx = addresses.index(addr)
+                            results[orig_idx] = (addr, balance_eth)
+                            
+                    return results
+                    
+            except Exception as e:
+                print(f"Batch balance check failed: {e}")
+            
+            # Fallback to individual checks
+            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                return list(executor.map(self.check_wallet, addresses))
+                
+        except Exception as e:
+            print(f"Batch processing error: {e}")
+            return [(None, 0.0)] * len(addresses)
 
     def check_wallets_batch(self, mnemonics: List[str]) -> List[Tuple[Optional[str], float]]:
         """Check multiple wallets in parallel with batch balance checking."""
